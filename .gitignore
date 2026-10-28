@@ -1,0 +1,6 @@
+.idea/
+build/
+Drivers/CMSIS/DSP/DSP_Lib_TestSuite/
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/Device/ST/STM32H7xx/Source/Templates/
+*.7z
