@@ -113,7 +113,7 @@ int main(void)
     uint32_t now = HAL_GetTick();
 
 
-    App_Task_Speed_Step();
+    App_Task_Position_Step();
 
     if (now - last_log >=5) {
       last_log = now;

@@ -10,14 +10,14 @@
 
 typedef struct
 {
-    uint16_t encoder_raw_prev; /* 上一帧编码器原始角度 */
-    uint16_t encoder_raw;      /* 当前编码器原始角度，0~8191 */
+    uint16_t encoder_raw_prev; /* 上一帧编码器原始计数 */
+    uint16_t encoder_raw;      /* 当前编码器原始计数，0~8191 */
     int32_t  turns;         /* 圈数 */
     int64_t  speed_count_prev; /* 上一个测速窗口的累计编码器计数 */
     int32_t  speed_count_diff; /* 最近一个测速窗口的计数差 */
     volatile uint32_t speed_update_seq; /* 新测速结果序号，由CAN接收更新 */
+    uint32_t position_pid_seq;          /* 位置PID已处理的测速序号 */
     uint32_t speed_pid_seq;             /* 速度PID已处理的测速序号 */
-    float    angle;         /* 当前展开角度，rad */
     float    speed_filtered; /* 对原始速度低通后的速度，rpm */
     float    speed_raw;      /* 未滤波速度，rpm */
     float    dt_ms;          /* 实际测速窗口时长，单位ms */
@@ -28,9 +28,10 @@ typedef struct
     float    current_sent;    /* 主控实际发送的电流给定，A */
 
     uint8_t  mode;          /* 0=电流 1=速度 2=位置 3=串级 */
-    float    target;        /* 速度模式为 rpm，位置模式为 rad，电流模式为 A */
+    float    target;        /* 速度模式为 rpm，位置模式为编码器计数，电流模式为 A */
 
     PID      position_pid;  /* 位置环PID */
+    PID      cascade_position_pid; /* 串级位置外环，输出目标转速 rpm */
     PID      speed_pid;     /* 速度环PID */
 
     uint64_t last_feedback_us;

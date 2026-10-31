@@ -30,14 +30,14 @@ void App_CAN_Init(void)
     HAL_TIM_Base_Start_IT(&htim5);
 
     Motor_Init(&motor);
-    Motor_Set_Mode(&motor, 1, 0.0f);
+    Motor_Set_Mode(&motor, 2, 0.0f);
 
     CAN_Init(&hfdcan1, App_CAN_Callback);
     HAL_TIM_Base_Start_IT(&htim6);
 
     HAL_Delay(2000);
 
-    Motor_Set_Mode(&motor, 1, 200.0f);
+    Motor_Set_Mode(&motor, 2, 2000.0f);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -58,15 +58,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void App_Log_Task(void)
 {
     char buf[160];
+    float pid_output = (motor.mode == 2) ?
+                       motor.position_pid.out : motor.speed_pid.out;
     int n = snprintf(buf, sizeof(buf), "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-                     motor.angle,
+                     (float)motor.encoder_raw,
                      motor.speed_filtered,
                      motor.speed_raw,
                      motor.dt_ms,
                      motor.current,
                      motor.current_command,
                      motor.current_sent,
-                     motor.speed_pid.out,
+                     pid_output,
                      motor.target);
 
     HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 10);
@@ -80,7 +82,7 @@ void App_Task_Speed_Step(void)
 
     uint32_t now = HAL_GetTick();
 
-    /* 从进入主循环开始计时，保证初始 200 rpm 保持完整 7 秒。 */
+    /* 从进入主循环开始计时，保证初始位置保持完整 7 秒。 */
     if (!started)
     {
         last_step_ms = now;
@@ -101,7 +103,9 @@ void App_Task_Position_Step(void)
 {
     static uint32_t last_step_ms = 0;
     static bool started = false;
-    static bool at_position_1 = false;
+    static uint8_t step_index = 0;
+    static const float position_targets[] =
+        {2000.0f, 4000.0f, 6000.0f, 2000.0f};
 
     uint32_t now = HAL_GetTick();
 
@@ -109,7 +113,7 @@ void App_Task_Position_Step(void)
     {
         last_step_ms = now;
         started = true;
-        Motor_Set_Mode(&motor, 2, 0.0f);
+        Motor_Set_Mode(&motor, 2, position_targets[step_index]);
         return;
     }
 
@@ -117,9 +121,9 @@ void App_Task_Position_Step(void)
         return;
 
     last_step_ms = now;
-    at_position_1 = !at_position_1;
+    step_index++;
+    if (step_index >= 4)
+        step_index = 0;
 
-    Motor_Set_Mode(&motor,
-                   2,
-                   at_position_1 ? 0.5f : 1.5f);
+    Motor_Set_Mode(&motor, 2, position_targets[step_index]);
 }

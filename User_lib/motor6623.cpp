@@ -10,6 +10,7 @@
 
 #define TWO_PI 6.2831853f
 #define CONTROL_DT 0.001f
+#define ENCODER_COUNTS_PER_TURN 8192.0f
 #define SPEED_UPDATE_PERIOD_US 5000ULL
 #define SPEED_CONTROL_DT (SPEED_UPDATE_PERIOD_US * 1.0e-6f)
 #define SPEED_FILTER_TAU 0.10f
@@ -43,8 +44,8 @@ void Motor_Init(Motor6623 *m)
     m->speed_count_prev = 0;
     m->speed_count_diff = 0;
     m->speed_update_seq = 0;
+    m->position_pid_seq = 0;
     m->speed_pid_seq = 0;
-    m->angle = 0;
     m->speed_filtered = 0.0f;
     m->speed_raw = 0.0f;
     m->dt_ms = 0.0f;
@@ -58,7 +59,11 @@ void Motor_Init(Motor6623 *m)
     m->last_feedback_us = SYS_Timestamp.Get_Current_Timestamp();
 
     PID_Init(&m->speed_pid, 0.032f, 0.3f, 0.0f, 2.7f, 5.0f, SPEED_CONTROL_DT);
-    PID_Init(&m->position_pid, 0.03f, 0.0f, 0.02f, 2.5f, 5.0f, CONTROL_DT);
+    PID_Init(&m->position_pid, 0.0075f, 0.0f,
+             0.000002f, 2.5f, 5.0f, CONTROL_DT);
+    /* 串级位置外环：编码器计数输入，目标速度 rpm 输出。 */
+    PID_Init(&m->cascade_position_pid, 0.10f, 0.0f, 0.0f,
+             0.0f, 200.0f, SPEED_CONTROL_DT);
 }
 
 
@@ -68,7 +73,7 @@ void Motor_Init(Motor6623 *m)
 void Motor_Parse(Motor6623 *m, uint8_t *buf)
 {
     uint64_t now_us = SYS_Timestamp.Get_Current_Timestamp();
-    uint16_t encoder_raw = (uint16_t)((buf[0] << 8) | buf[1]); //当前角度
+    uint16_t encoder_raw = (uint16_t)((buf[0] << 8) | buf[1]); //当前计数
     if (encoder_raw > 8191) return;                           //多的扔掉
     int16_t  cur = (int16_t)((buf[2] << 8) | buf[3]);       //当前电流
     m->encoder_raw = encoder_raw;
@@ -83,9 +88,7 @@ void Motor_Parse(Motor6623 *m, uint8_t *buf)
 
     m->encoder_raw_prev = encoder_raw;
     int64_t count_total = (int64_t)m->turns * 8192LL + encoder_raw;
-    float angle = ((float)m->turns * 8192.0f + encoder_raw) * (TWO_PI / 8192.0f);//角度计算
-
-    /* 第一帧只建立角度、计数和时间基准，不参与测速。 */
+    /* 第一帧只建立计数和时间基准，不参与测速。 */
     if (!m->initialized)
     {
         m->initialized = 1;
@@ -146,7 +149,6 @@ void Motor_Parse(Motor6623 *m, uint8_t *buf)
             m->speed_count_diff = 0;
         }
     }
-    m->angle = angle;
     m->current = MOTOR_DIR * (cur / 1000.0f);//毫安转安
     m->current_command = MOTOR_DIR *(int16_t)((buf[4] << 8) | buf[5]) / 1000.0f;
     m->last_feedback_us = now_us;
@@ -167,6 +169,7 @@ void Motor_Update_1kHz(Motor6623 *m)
 
     uint32_t speed_seq = m->speed_update_seq;
     bool speed_updated = (speed_seq != m->speed_pid_seq);
+    bool position_updated = (speed_seq != m->position_pid_seq);
     bool speed_pid_updated = false;
     float out = 0.0f;
     switch (m->mode)
@@ -186,17 +189,37 @@ void Motor_Update_1kHz(Motor6623 *m)
             }
             out = m->speed_pid.out;
             break;
-        case 2: out = PID_Update(&m->position_pid, m->target, m->angle); break;
+        case 2:
+            if (position_updated && m->dt_ms > 0.0f)
+            {
+                /* 位置 PID 与测速窗口同步，使用实际反馈时间间隔。 */
+                m->position_pid.dt = m->dt_ms * 0.001f;
+                PID_Update(&m->position_pid,
+                           m->target, (float)m->encoder_raw);
+                m->position_pid_seq = speed_seq;
+            }
+            out = m->position_pid.out;
+            break;
         case 3:
         {
-            float vref = PID_Update(&m->position_pid, m->target, m->angle);
-            if (vref >  286.48f) vref =  286.48f;
-            if (vref < -286.48f) vref = -286.48f;
             if (speed_updated && m->dt_ms > 0.0f)
             {
+                /* 位置外环和速度内环都按新的测速结果更新。 */
+                m->cascade_position_pid.dt = m->dt_ms * 0.001f;
+                float speed_target =
+                    PID_Update_Limited(&m->cascade_position_pid,
+                                       m->target,
+                                       (float)m->encoder_raw,
+                                       -200.0f,
+                                       200.0f);
+
                 /* 速度 PID 使用实际测速窗口，而不是固定的 1 ms。 */
                 m->speed_pid.dt = m->dt_ms * 0.001f;
-                PID_Update(&m->speed_pid, vref, m->speed_filtered);
+                PID_Update_Limited(&m->speed_pid,
+                                   speed_target,
+                                   m->speed_filtered,
+                                   -5.0f,
+                                   5.0f);
                 speed_pid_updated = true;
             }
             out = m->speed_pid.out;
@@ -225,7 +248,9 @@ void Motor_Set_Mode(Motor6623 *m, uint8_t mode, float target)
 
     if (mode_changed)
     {
-        PID_Reset(&m->position_pid, m->angle);
+        PID_Reset(&m->position_pid, (float)m->encoder_raw);
+        PID_Reset(&m->cascade_position_pid, (float)m->encoder_raw);
+        m->position_pid_seq = m->speed_update_seq;
         PID_Reset(&m->speed_pid, m->speed_filtered);
         m->speed_pid_seq = m->speed_update_seq;
     }
